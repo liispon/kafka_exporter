@@ -40,8 +40,10 @@ var (
 	topicPartitionUsesPreferredReplica *prometheus.Desc
 	topicUnderReplicatedPartition      *prometheus.Desc
 	consumergroupCurrentOffset         *prometheus.Desc
+	consumergroupCurrentOffsetInstance *prometheus.Desc
 	consumergroupCurrentOffsetSum      *prometheus.Desc
 	consumergroupLag                   *prometheus.Desc
+	consumergroupLagInstance           *prometheus.Desc
 	consumergroupLagSum                *prometheus.Desc
 	consumergroupLagZookeeper          *prometheus.Desc
 	consumergroupMembers               *prometheus.Desc
@@ -211,8 +213,10 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- topicPartitionUsesPreferredReplica
 	ch <- topicUnderReplicatedPartition
 	ch <- consumergroupCurrentOffset
+	ch <- consumergroupCurrentOffsetInstance
 	ch <- consumergroupCurrentOffsetSum
 	ch <- consumergroupLag
+	ch <- consumergroupLagInstance
 	ch <- consumergroupLagZookeeper
 	ch <- consumergroupLagSum
 }
@@ -382,6 +386,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			plog.Errorf("Cannot get describe groups: %v", err)
 			return
 		}
+
 		for _, group := range describeGroups.Groups {
 			offsetFetchRequest := sarama.OffsetFetchRequest{ConsumerGroup: group.GroupId, Version: 1}
 			for topic, partitions := range offset {
@@ -409,15 +414,35 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 						var currentOffsetSum int64
 						var lagSum int64
 						for partition, offsetFetchResponseBlock := range partitions {
+
 							err := offsetFetchResponseBlock.Err
 							if err != sarama.ErrNoError {
 								plog.Errorf("Error for  partition %d :%v", partition, err.Error())
 								continue
 							}
+
+							consumerInstance := "undefined"
+
+							for _, member := range group.Members {
+								assignment, err := member.GetMemberAssignment()
+								if err != nil {
+									plog.Errorf("Error pulling group assignments %v:%v :%v", member.ClientId, member.ClientHost, err.Error())
+								} else {
+									for _, p := range assignment.Topics[topic] {
+										if p == partition {
+											consumerInstance = fmt.Sprintf("%v:%v", member.ClientId, member.ClientHost)
+										}
+									}
+								}
+							}
+
 							currentOffset := offsetFetchResponseBlock.Offset
 							currentOffsetSum += currentOffset
 							ch <- prometheus.MustNewConstMetric(
 								consumergroupCurrentOffset, prometheus.GaugeValue, float64(currentOffset), group.GroupId, topic, strconv.FormatInt(int64(partition), 10),
+							)
+							ch <- prometheus.MustNewConstMetric(
+								consumergroupCurrentOffsetInstance, prometheus.GaugeValue, float64(currentOffset), group.GroupId, topic, strconv.FormatInt(int64(partition), 10), consumerInstance,
 							)
 							e.mu.Lock()
 							if offset, ok := offset[topic][partition]; ok {
@@ -432,6 +457,9 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 								}
 								ch <- prometheus.MustNewConstMetric(
 									consumergroupLag, prometheus.GaugeValue, float64(lag), group.GroupId, topic, strconv.FormatInt(int64(partition), 10),
+								)
+								ch <- prometheus.MustNewConstMetric(
+									consumergroupLagInstance, prometheus.GaugeValue, float64(lag), group.GroupId, topic, strconv.FormatInt(int64(partition), 10), consumerInstance,
 								)
 							} else {
 								plog.Errorf("No offset of topic %s partition %d, cannot get consumer group lag", topic, partition)
@@ -569,6 +597,12 @@ func main() {
 		[]string{"consumergroup", "topic", "partition"}, labels,
 	)
 
+	consumergroupCurrentOffsetInstance = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "consumergroup", "current_offset_instance"),
+		"Current Offset of a ConsumerGroup at Topic/Partition/Consumer Instance",
+		[]string{"consumergroup", "topic", "partition", "consumerinstance"}, labels,
+	)
+
 	consumergroupCurrentOffsetSum = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "consumergroup", "current_offset_sum"),
 		"Current Offset of a ConsumerGroup at Topic for all partitions",
@@ -579,6 +613,12 @@ func main() {
 		prometheus.BuildFQName(namespace, "consumergroup", "lag"),
 		"Current Approximate Lag of a ConsumerGroup at Topic/Partition",
 		[]string{"consumergroup", "topic", "partition"}, labels,
+	)
+
+	consumergroupLagInstance = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "consumergroup", "lag_instance"),
+		"Current Approximate Lag of a ConsumerGroup at Topic/Partition/Consumer Instance",
+		[]string{"consumergroup", "topic", "partition", "consumerinstance"}, labels,
 	)
 
 	consumergroupLagZookeeper = prometheus.NewDesc(
