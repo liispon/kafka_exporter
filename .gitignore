@@ -20,6 +20,8 @@ kafka_exporter
 # Project IDE
 .idea/
 *.iml
+vendor/
 
 # Test configuration
 test/
+
