@@ -1,5 +1,4 @@
-FROM        quay.io/prometheus/busybox:latest
-MAINTAINER  Daniel Qian <qsj.daniel@gmail.com>
+FROM        debian:jessie
 
 COPY kafka_exporter /bin/kafka_exporter
 

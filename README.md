@@ -197,10 +197,12 @@ kafka_topic_partition_under_replicated_partition{partition="0",topic="__consumer
 
 **Metrics details**
 
-| Name                                 | Exposed informations                                          |
-| ------------------------------------ | ------------------------------------------------------------- |
-| `kafka_consumergroup_current_offset` | Current Offset of a ConsumerGroup at Topic/Partition          |
-| `kafka_consumergroup_lag`            | Current Approximate Lag of a ConsumerGroup at Topic/Partition |
+| Name                                          | Exposed informations                                          |
+| ----------------------------------------------| ------------------------------------------------------------- |
+| `kafka_consumergroup_current_offset`          | Current Offset of a ConsumerGroup at Topic/Partition          |
+| `kafka_consumergroup_lag`                     | Current Approximate Lag of a ConsumerGroup at Topic/Partition |
+| `kafka_consumergroup_current_offset_instance` | Current Offset of a ConsumerGroup at Topic/Partition including instance|
+| `kafka_consumergroup_lag_instance`            | Current Approximate Lag of a ConsumerGroup at Topic/Partition including instance|
 
 **Metrics output example**
 
@@ -226,16 +228,9 @@ Contribute
 
 If you like Kafka Exporter, please give me a star. This will help more people know Kafka Exporter.
 
-Please feel free to send me [pull requests](https://github.com/danielqsj/kafka_exporter/pulls).
-
-Donation
---------
-
-Your donation will encourage me to continue to improve Kafka Exporter. Support Alipay donation.
-
-![](https://github.com/danielqsj/kafka_exporter/raw/master/alipay.jpg)
+Please feel free to send me [pull requests](https://github.com/digitalocean/kafka_exporter/pulls).
 
 License
 -------
 
-Code is licensed under the [Apache License 2.0](https://github.com/danielqsj/kafka_exporter/blob/master/LICENSE).
+Code is licensed under the [Apache License 2.0](https://github.com/digitalocean/kafka_exporter/blob/master/LICENSE).
