@@ -59,7 +59,6 @@ type Exporter struct {
 	adminClient             sarama.ClusterAdmin
 	topicFilter             *regexp.Regexp
 	groupFilter             *regexp.Regexp
-	mu                      sync.Mutex
 	nextMetadataRefresh     time.Time
 	metadataRefreshInterval time.Duration
 }
@@ -218,6 +217,21 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- consumergroupLagSum
 }
 
+func (e *Exporter) Close() error {
+	adminErr := e.adminClient.Close()
+	clientErr := e.client.Close()
+
+	if adminErr != nil {
+		return adminErr
+	}
+
+	if clientErr != nil {
+		return clientErr
+	}
+
+	return nil
+}
+
 func exportTopicDetail(ch chan<- prometheus.Metric, detail sarama.TopicDetail, desc *prometheus.Desc, topic, entry string) {
 	if value := detail.ConfigEntries[entry]; value != nil {
 		if result, err := strconv.ParseInt(*value, 16, 64); err == nil {
@@ -238,6 +252,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		clusterBrokers, prometheus.GaugeValue, float64(len(e.client.Brokers())),
 	)
 
+	offsetMutex := sync.RWMutex{}
 	offset := make(map[string]map[int32]int64)
 
 	now := time.Now()
@@ -270,13 +285,12 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	if err != nil {
 		plog.Errorf("Cannot load topic admin info: %v", err)
-		return
-	}
-
-	for _, topic := range topics {
-		if metadata, found := topicMetadata[topic]; found {
-			exportTopicDetail(ch, metadata, topicRetentionBytes, topic, retentionBytes)
-			exportTopicDetail(ch, metadata, topicRetentionMs, topic, retentionMs)
+	} else {
+		for _, topic := range topics {
+			if metadata, found := topicMetadata[topic]; found {
+				exportTopicDetail(ch, metadata, topicRetentionBytes, topic, retentionBytes)
+				exportTopicDetail(ch, metadata, topicRetentionMs, topic, retentionMs)
+			}
 		}
 	}
 
@@ -288,13 +302,15 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			plog.Errorf("Cannot get partitions of topic %s: %v", topic, err)
 			return
 		}
+
 		ch <- prometheus.MustNewConstMetric(
 			topicPartitions, prometheus.GaugeValue, float64(len(partitions)), topic,
 		)
 
-		e.mu.Lock()
+		offsetMutex.Lock()
 		offset[topic] = make(map[int32]int64, len(partitions))
-		e.mu.Unlock()
+		offsetMutex.Unlock()
+
 		for _, partition := range partitions {
 			broker, err := e.client.Leader(topic, partition)
 			if err != nil {
@@ -309,12 +325,15 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			if err != nil {
 				plog.Errorf("Cannot get current offset of topic %s partition %d: %v", topic, partition, err)
 			} else {
-				e.mu.Lock()
-				offset[topic][partition] = currentOffset
-				e.mu.Unlock()
-				ch <- prometheus.MustNewConstMetric(
-					topicCurrentOffset, prometheus.GaugeValue, float64(currentOffset), topic, strconv.FormatInt(int64(partition), 10),
-				)
+				func() {
+					offsetMutex.Lock()
+					defer offsetMutex.Unlock()
+
+					offset[topic][partition] = currentOffset
+					ch <- prometheus.MustNewConstMetric(
+						topicCurrentOffset, prometheus.GaugeValue, float64(currentOffset), topic, strconv.FormatInt(int64(partition), 10),
+					)
+				}()
 			}
 
 			oldestOffset, err := e.client.GetOffset(topic, partition, sarama.OffsetOldest)
@@ -371,45 +390,40 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		go getTopicMetrics(topic)
 	}
 
-	wg.Wait()
-
-	getConsumerGroupMetrics := func(broker *sarama.Broker) {
-		defer wg.Done()
-		if err := broker.Open(e.client.Config()); err != nil && err != sarama.ErrAlreadyConnected {
-			plog.Errorf("Cannot connect to broker %d: %v", broker.ID(), err)
-			return
-		}
-		defer broker.Close()
-
-		groups, err := broker.ListGroups(&sarama.ListGroupsRequest{})
+	getConsumerGroupMetrics := func() {
+		groups, err := e.adminClient.ListConsumerGroups()
 		if err != nil {
 			plog.Errorf("Cannot get consumer group: %v", err)
 			return
 		}
+
 		groupIds := make([]string, 0)
-		for groupId := range groups.Groups {
+		for groupId := range groups {
 			if e.groupFilter.MatchString(groupId) {
 				groupIds = append(groupIds, groupId)
 			}
 		}
 
-		describeGroups, err := broker.DescribeGroups(&sarama.DescribeGroupsRequest{Groups: groupIds})
+		describeGroups, err := e.adminClient.DescribeConsumerGroups(groupIds)
 		if err != nil {
 			plog.Errorf("Cannot get describe groups: %v", err)
 			return
 		}
 
-		for _, group := range describeGroups.Groups {
-			offsetFetchRequest := sarama.OffsetFetchRequest{ConsumerGroup: group.GroupId, Version: 1}
+		for _, group := range describeGroups {
+			topicPartitions := make(map[string][]int32)
+
 			for topic, partitions := range offset {
+				topicPartitions[topic] = make([]int32, 0, len(partitions))
 				for partition := range partitions {
-					offsetFetchRequest.AddPartition(topic, partition)
+					topicPartitions[topic] = append(topicPartitions[topic], partition)
 				}
 			}
 			ch <- prometheus.MustNewConstMetric(
 				consumergroupMembers, prometheus.GaugeValue, float64(len(group.Members)), group.GroupId,
 			)
-			if offsetFetchResponse, err := broker.FetchOffset(&offsetFetchRequest); err != nil {
+
+			if offsetFetchResponse, err := e.adminClient.ListConsumerGroupOffsets(group.GroupId, topicPartitions); err != nil {
 				plog.Errorf("Cannot get offset of group %s: %v", group.GroupId, err)
 			} else {
 				for topic, partitions := range offsetFetchResponse.Blocks {
@@ -456,27 +470,30 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 							ch <- prometheus.MustNewConstMetric(
 								consumergroupCurrentOffsetInstance, prometheus.GaugeValue, float64(currentOffset), group.GroupId, topic, strconv.FormatInt(int64(partition), 10), consumerInstance,
 							)
-							e.mu.Lock()
-							if offset, ok := offset[topic][partition]; ok {
-								// If the topic is consumed by that consumer group, but no offset associated with the partition
-								// forcing lag to -1 to be able to alert on that
-								var lag int64
-								if offsetFetchResponseBlock.Offset == -1 {
-									lag = -1
+
+							func() {
+								offsetMutex.RLock()
+								defer offsetMutex.RUnlock()
+								if offset, ok := offset[topic][partition]; ok {
+									// If the topic is consumed by that consumer group, but no offset associated with the partition
+									// forcing lag to -1 to be able to alert on that
+									var lag int64
+									if offsetFetchResponseBlock.Offset == -1 {
+										lag = -1
+									} else {
+										lag = offset - offsetFetchResponseBlock.Offset
+										lagSum += lag
+									}
+									ch <- prometheus.MustNewConstMetric(
+										consumergroupLag, prometheus.GaugeValue, float64(lag), group.GroupId, topic, strconv.FormatInt(int64(partition), 10),
+									)
+									ch <- prometheus.MustNewConstMetric(
+										consumergroupLagInstance, prometheus.GaugeValue, float64(lag), group.GroupId, topic, strconv.FormatInt(int64(partition), 10), consumerInstance,
+									)
 								} else {
-									lag = offset - offsetFetchResponseBlock.Offset
-									lagSum += lag
+									plog.Errorf("No offset of topic %s partition %d, cannot get consumer group lag", topic, partition)
 								}
-								ch <- prometheus.MustNewConstMetric(
-									consumergroupLag, prometheus.GaugeValue, float64(lag), group.GroupId, topic, strconv.FormatInt(int64(partition), 10),
-								)
-								ch <- prometheus.MustNewConstMetric(
-									consumergroupLagInstance, prometheus.GaugeValue, float64(lag), group.GroupId, topic, strconv.FormatInt(int64(partition), 10), consumerInstance,
-								)
-							} else {
-								plog.Errorf("No offset of topic %s partition %d, cannot get consumer group lag", topic, partition)
-							}
-							e.mu.Unlock()
+							}()
 						}
 						ch <- prometheus.MustNewConstMetric(
 							consumergroupCurrentOffsetSum, prometheus.GaugeValue, float64(currentOffsetSum), group.GroupId, topic,
@@ -490,15 +507,9 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 
-	if len(e.client.Brokers()) > 0 {
-		for _, broker := range e.client.Brokers() {
-			wg.Add(1)
-			go getConsumerGroupMetrics(broker)
-		}
-		wg.Wait()
-	} else {
-		plog.Errorln("No valid broker, cannot get consumer group metrics")
-	}
+	getConsumerGroupMetrics()
+
+	wg.Wait()
 }
 
 func init() {
@@ -669,7 +680,7 @@ func main() {
 	if err != nil {
 		plog.Fatalln(err)
 	}
-	defer exporter.client.Close()
+	defer exporter.Close()
 	prometheus.MustRegister(exporter)
 
 	http.Handle(*metricsPath, promhttp.Handler())
