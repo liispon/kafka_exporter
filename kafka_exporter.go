@@ -234,7 +234,7 @@ func (e *Exporter) Close() error {
 
 func exportTopicDetail(ch chan<- prometheus.Metric, detail sarama.TopicDetail, desc *prometheus.Desc, topic, entry string) {
 	if value := detail.ConfigEntries[entry]; value != nil {
-		if result, err := strconv.ParseInt(*value, 16, 64); err == nil {
+		if result, err := strconv.ParseInt(*value, 10, 64); err == nil {
 			ch <- prometheus.MustNewConstMetric(
 				desc, prometheus.GaugeValue, float64(result), topic,
 			)
