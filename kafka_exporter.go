@@ -56,7 +56,7 @@ var (
 // the prometheus metrics package.
 type Exporter struct {
 	client                  sarama.Client
-	adminClient             sarama.ClusterAdmin
+	adminClient             func() (sarama.ClusterAdmin, error)
 	topicFilter             *regexp.Regexp
 	groupFilter             *regexp.Regexp
 	nextMetadataRefresh     time.Time
@@ -116,6 +116,13 @@ func canReadFile(path string) bool {
 // NewExporter returns an initialized Exporter.
 func NewExporter(opts kafkaOpts, topicFilter string, groupFilter string) (*Exporter, error) {
 	config := sarama.NewConfig()
+	config.Admin.Timeout = time.Second * 5
+	config.Net.KeepAlive = time.Second * 30
+	config.Net.MaxOpenRequests = 10
+	config.Metadata.Retry.Max = 5
+	config.Metadata.Retry.Backoff = time.Second * 5
+	config.Metadata.Timeout = time.Second * 5
+	config.Metadata.RefreshFrequency = time.Second * 10
 	config.ClientID = clientID
 	kafkaVersion, err := sarama.ParseKafkaVersion(opts.kafkaVersion)
 	if err != nil {
@@ -175,18 +182,18 @@ func NewExporter(opts kafkaOpts, topicFilter string, groupFilter string) (*Expor
 	config.Metadata.RefreshFrequency = interval
 
 	client, err := sarama.NewClient(opts.uri, config)
-	adminClient, err := sarama.NewClusterAdmin(opts.uri, config)
 
 	if err != nil {
-		plog.Errorln("Error Init Kafka Client")
-		panic(err)
+		plog.Fatalf("Error Init Kafka Client: %v", err)
 	}
 	plog.Infoln("Done Init Clients")
 
 	// Init our exporter.
 	return &Exporter{
-		client:                  client,
-		adminClient:             adminClient,
+		client: client,
+		adminClient: func() (sarama.ClusterAdmin, error) {
+			return sarama.NewClusterAdmin(opts.uri, config)
+		},
 		topicFilter:             regexp.MustCompile(topicFilter),
 		groupFilter:             regexp.MustCompile(groupFilter),
 		nextMetadataRefresh:     time.Now(),
@@ -218,12 +225,7 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (e *Exporter) Close() error {
-	adminErr := e.adminClient.Close()
 	clientErr := e.client.Close()
-
-	if adminErr != nil {
-		return adminErr
-	}
 
 	if clientErr != nil {
 		return clientErr
@@ -251,6 +253,18 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		clusterBrokers, prometheus.GaugeValue, float64(len(e.client.Brokers())),
 	)
+
+	adminClient, err := e.adminClient()
+
+	if err != nil {
+		plog.Fatalf("could not load admin client: %v", err)
+	}
+
+	defer func() {
+		if err := adminClient.Close(); err != nil {
+			plog.Errorf("failed to close admin client: %v", err)
+		}
+	}()
 
 	offsetMutex := sync.RWMutex{}
 	offset := make(map[string]map[int32]int64)
@@ -281,7 +295,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 
-	topicMetadata, err := e.adminClient.ListTopics()
+	topicMetadata, err := adminClient.ListTopics()
 
 	if err != nil {
 		plog.Errorf("Cannot load topic admin info: %v", err)
@@ -391,7 +405,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	getConsumerGroupMetrics := func() {
-		groups, err := e.adminClient.ListConsumerGroups()
+		groups, err := adminClient.ListConsumerGroups()
 		if err != nil {
 			plog.Errorf("Cannot get consumer group: %v", err)
 			return
@@ -404,7 +418,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			}
 		}
 
-		describeGroups, err := e.adminClient.DescribeConsumerGroups(groupIds)
+		describeGroups, err := adminClient.DescribeConsumerGroups(groupIds)
 		if err != nil {
 			plog.Errorf("Cannot get describe groups: %v", err)
 			return
@@ -423,7 +437,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 				consumergroupMembers, prometheus.GaugeValue, float64(len(group.Members)), group.GroupId,
 			)
 
-			if offsetFetchResponse, err := e.adminClient.ListConsumerGroupOffsets(group.GroupId, topicPartitions); err != nil {
+			if offsetFetchResponse, err := adminClient.ListConsumerGroupOffsets(group.GroupId, topicPartitions); err != nil {
 				plog.Errorf("Cannot get offset of group %s: %v", group.GroupId, err)
 			} else {
 				for topic, partitions := range offsetFetchResponse.Blocks {

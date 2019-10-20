@@ -1,4 +1,4 @@
-FROM        debian:jessie
+FROM        debian:buster
 
 COPY kafka_exporter /bin/kafka_exporter
 
