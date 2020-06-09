@@ -1,6 +1,6 @@
-FROM        debian:buster
+FROM alpine:latest
 
-COPY kafka_exporter /bin/kafka_exporter
+COPY kafka_exporter.linux /bin/kafka_exporter
 
-EXPOSE     9308
+EXPOSE 9308
 ENTRYPOINT [ "/bin/kafka_exporter" ]

@@ -404,6 +404,8 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		go getTopicMetrics(topic)
 	}
 
+	wg.Wait()
+
 	getConsumerGroupMetrics := func() {
 		groups, err := adminClient.ListConsumerGroups()
 		if err != nil {
@@ -523,7 +525,6 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	getConsumerGroupMetrics()
 
-	wg.Wait()
 }
 
 func init() {
