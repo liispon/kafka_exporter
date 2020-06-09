@@ -29,6 +29,6 @@ stages:
       inputs:
         containerRegistry: 'docker-hub'
         repository: 'liispon/kafka_exporter'
-        command: 'build'
+        command: 'buildAndPush'
         Dockerfile: '**/Dockerfile'
         tags: '$(tag)'
