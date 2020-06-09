@@ -20,9 +20,6 @@ stages:
     pool:
       vmImage: 'ubuntu-latest'
     steps:
-    - script: sudo apt install docker-ce
-      displayName: 'Install docker'
-
     - script: sudo apt install golang
       displayName: 'Install golang'
 
